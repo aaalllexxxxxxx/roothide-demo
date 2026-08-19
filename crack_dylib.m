@@ -1,67 +1,25 @@
 // crack_dylib.m
-// PUBG HUD 破解 dylib - 免卡密 + 自定义卡密验证
+// 最简测试版：只弹一个卡密输入弹窗
+// 不做任何 swizzle/hook，只验证 dylib 是否被加载
 //
-// 编译方式 (需要在 macOS 交叉编译环境):
+// 编译:
 // clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit \
-//   -framework QuartzCore -o crack.dylib crack_dylib.m
-//
-// 或者用 theos:
-// make package
-//
-// 功能:
-// 1. app 启动时自动注入 offsets 和 feature config
-// 2. 跳过原始验证管道，直接 finishSuccess
-// 3. 显示自定义卡密验证界面，输入指定卡密才能进入
-// 4. 阻止后续的吊销/心跳/定时器
+//   -framework QuartzCore -undefined dynamic_lookup -flat_namespace \
+//   -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+//   -target arm64-apple-ios14.0 \
+//   -o crack.dylib crack_dylib.m
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 
-// ====== 前向声明 ======
-@interface NwGameOffsets : NSObject
-+ (void)applyDictionary:(NSDictionary *)dict;
-+ (BOOL)isReady;
-@end
-
-@interface NxFeat : NSObject
-+ (void)applyDictionary:(NSDictionary *)dict;
-+ (BOOL)isReady;
-@end
-
-@interface NwSession : NSObject
-+ (BOOL)runtimeLicenseOK;
-- (void)setRuntimeLicenseOK:(BOOL)val;
-- (void)nw_revokeRuntimeLicense:(BOOL)arg;
-- (void)nw_sessEnd:(NSInteger)status message:(NSString *)msg;
-- (void)clearSession;
-- (void)startLicenseWatchWithInterval:(double)interval;
-- (void)startHeartbeatWithInterval:(double)interval onResult:(id)block;
-+ (void)showForceExitAlertWithMessage:(NSString *)msg;
-@end
-
-@interface NwEntryPanel : UIView
-- (void)beginVerification;
-- (void)nw_runEntryPipeline;
-- (void)onActivateTap;
-- (void)finishSuccess;
-- (void)setBusy:(BOOL)busy;
-- (void)setHidden:(BOOL)hidden;
-- (void)removeFromSuperview;
-@property (retain, nonatomic) UITextField *kamiField;
-@end
-
-@interface MainRootViewController : UIViewController
-- (void)nw_onSessEnd:(id)notif;
-@end
-
-// ====== 自定义卡密验证界面 ======
+// ====== 卡密验证视图 ======
 @interface CrackVerifyView : UIView <UITextFieldDelegate>
 @property (strong, nonatomic) UITextField *inputField;
 @property (strong, nonatomic) UIButton *verifyButton;
 @property (strong, nonatomic) UILabel *titleLabel;
 @property (strong, nonatomic) UILabel *hintLabel;
 @property (strong, nonatomic) UILabel *errorLabel;
-@property (strong, nonatomic) void (^onSuccess)(void);
 @end
 
 @implementation CrackVerifyView
@@ -75,9 +33,9 @@
 }
 
 - (void)setupUI {
-    self.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.1 alpha:0.95];
+    self.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.1 alpha:0.97];
 
-    // 标题
+    // 标题 "PUBG HUD"
     self.titleLabel = [[UILabel alloc] init];
     self.titleLabel.text = @"PUBG HUD";
     self.titleLabel.textColor = [UIColor colorWithRed:0.3 green:0.8 blue:0.4 alpha:1.0];
@@ -112,7 +70,7 @@
     self.inputField.delegate = self;
     [self addSubview:self.inputField];
 
-    // 验证按钮
+    // 激活按钮
     self.verifyButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.verifyButton setTitle:@"激 活" forState:UIControlStateNormal];
     self.verifyButton.titleLabel.font = [UIFont boldSystemFontOfSize:18];
@@ -160,22 +118,17 @@
 
 - (void)verifyKami {
     NSString *input = self.inputField.text;
-
-    // 指定卡密
     NSString *correctKami = @"XianyuWeihuabinggan";
 
     if ([input isEqualToString:correctKami]) {
         // 卡密正确
         self.errorLabel.textColor = [UIColor colorWithRed:0.3 green:0.8 blue:0.4 alpha:1.0];
-        self.errorLabel.text = @"卡密验证成功，正在进入...";
+        self.errorLabel.text = @"卡密验证成功！";
 
         [UIView animateWithDuration:0.3 animations:^{
             self.alpha = 0;
         } completion:^(BOOL finished) {
             [self removeFromSuperview];
-            if (self.onSuccess) {
-                self.onSuccess();
-            }
         }];
     } else {
         // 卡密错误
@@ -199,364 +152,49 @@
 
 @end
 
-// ====== Method Swizzle 工具 ======
-#import <objc/runtime.h>
+// ====== 弹出卡密界面 ======
+static void showKamiView() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            NSLog(@"[CRACK] showKamiView called");
 
-static void swizzleMethod(Class class, SEL originalSel, SEL swizzledSel) {
-    Method originalMethod = class_getInstanceMethod(class, originalSel);
-    Method swizzledMethod = class_getInstanceMethod(class, swizzledSel);
-    if (originalMethod && swizzledMethod) {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    }
-}
+            // 获取 app 的主窗口
+            UIWindow *window = nil;
+            for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                if (w.isKeyWindow || (!window)) {
+                    window = w;
+                }
+            }
+            if (!window) {
+                NSLog(@"[CRACK] no window found, retry in 1s");
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    showKamiView();
+                });
+                return;
+            }
 
-static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
-    Method originalMethod = class_getClassMethod(class, originalSel);
-    Method swizzledMethod = class_getClassMethod(class, swizzledSel);
-    if (originalMethod && swizzledMethod) {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    }
-}
+            NSLog(@"[CRACK] window: %@", window);
 
-// ====== 破解逻辑 ======
-static NwEntryPanel *g_panel = nil;
-static BOOL g_finishSuccessDone = NO;
-static BOOL g_injected = NO;
-
-// 注入 offsets 和 feature config
-static void injectOffsetsAndFeature() {
-    if (g_injected) return;
-    g_injected = YES;
-
-    @autoreleasepool {
-        NSLog(@"[CRACK] Injecting offsets and feature config...");
-
-        // 构造 offsets 字典
-        NSMutableDictionary *offsetsDict = [NSMutableDictionary dictionary];
-        [offsetsDict setObject:@"0x10C464C8" forKey:@"gWorld"];
-
-        NSMutableDictionary *offsetsFull = [NSMutableDictionary dictionary];
-        [offsetsFull setObject:@"pubg" forKey:@"game"];
-        [offsetsFull setObject:@(1) forKey:@"cfg_ver"];
-        [offsetsFull setObject:@(2147483647) forKey:@"exp"];
-        [offsetsFull setObject:offsetsDict forKey:@"offsets"];
-
-        // 调用 NwGameOffsets applyDictionary:
-        [NwGameOffsets applyDictionary:offsetsFull];
-        NSLog(@"[CRACK] NwGameOffsets applyDictionary: injected!");
-
-        BOOL ready = [NwGameOffsets isReady];
-        NSLog(@"[CRACK] NwGameOffsets.isReady = %d", ready);
-
-        // 构造 feature config 字典
-        NSMutableDictionary *featDict = [NSMutableDictionary dictionary];
-        [featDict setObject:@(1) forKey:@"cfg_ver"];
-        [featDict setObject:@(1) forKey:@"esp_enabled"];
-        [featDict setObject:@(2147483647) forKey:@"exp"];
-
-        // 调用 NxFeat applyDictionary:
-        [NxFeat applyDictionary:featDict];
-        NSLog(@"[CRACK] NxFeat applyDictionary: injected!");
-
-        BOOL featReady = [NxFeat isReady];
-        NSLog(@"[CRACK] NxFeat.isReady = %d", featReady);
-    }
-}
-
-// ====== Swizzled 方法实现 ======
-// 必须放在一个 Category 里，否则编译器报 "missing context for method declaration"
-
-@interface NwEntryPanel (Crack)
-- (void)crack_beginVerification;
-- (void)crack_onActivateTap;
-- (void)crack_nw_runEntryPipeline;
-- (void)crack_finishSuccess;
-- (void)crack_setRuntimeLicenseOK:(BOOL)val;
-- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg;
-@end
-
-@interface NwSession (Crack)
-- (void)crack_setRuntimeLicenseOK:(BOOL)val;
-- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg;
-- (void)crack_nw_sessEnd:(NSInteger)status message:(NSString *)msg;
-- (void)crack_clearSession;
-- (void)crack_startLicenseWatchWithInterval:(double)interval;
-- (void)crack_startHeartbeatWithInterval:(double)interval onResult:(id)block;
-+ (void)crack_showForceExitAlertWithMessage:(NSString *)msg;
-@end
-
-@interface MainRootViewController (Crack)
-- (void)crack_nw_onSessEnd:(id)notif;
-@end
-
-@implementation NwEntryPanel (Crack)
-
-// beginVerification → 替换为卡密验证界面
-- (void)crack_beginVerification {
-    @autoreleasepool {
-        NSLog(@"[CRACK] beginVerification intercepted - showing kami verify");
-
-        NwEntryPanel *panel = (NwEntryPanel *)self;
-        g_panel = panel;
-
-        // 创建卡密验证界面
-        CrackVerifyView *verifyView = [[CrackVerifyView alloc] initWithFrame:panel.bounds];
-        verifyView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        verifyView.onSuccess = ^{
-            // 卡密验证成功后，注入数据并 finishSuccess
-            injectOffsetsAndFeature();
-            [g_panel setBusy:NO];
-            [g_panel finishSuccess];
-        };
-
-        // 添加到面板上
-        [panel addSubview:verifyView];
-    }
-}
-
-// onActivateTap → 替换（不做事，因为卡密界面已显示）
-- (void)crack_onActivateTap {
-    NSLog(@"[CRACK] onActivateTap intercepted (ignored, kami view shown)");
-}
-
-// nw_runEntryPipeline → 替换为卡密验证界面
-- (void)crack_nw_runEntryPipeline {
-    @autoreleasepool {
-        NSLog(@"[CRACK] nw_runEntryPipeline intercepted - showing kami verify");
-        [(id)self crack_beginVerification];
-    }
-}
-
-// finishSuccess → 保护原始实现
-- (void)crack_finishSuccess {
-    @autoreleasepool {
-        NSLog(@"[CRACK] finishSuccess intercepted");
-        if (g_finishSuccessDone) {
-            NSLog(@"[CRACK] finishSuccess already done, skip");
-            return;
+            CGRect screenBounds = [UIScreen mainScreen].bounds;
+            CrackVerifyView *verifyView = [[CrackVerifyView alloc] initWithFrame:screenBounds];
+            verifyView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [window addSubview:verifyView];
+            NSLog(@"[CRACK] kami view added to window");
         }
-        g_finishSuccessDone = YES;
-
-        // 确保数据已注入
-        injectOffsetsAndFeature();
-
-        // 调用原始实现
-        [(id)self crack_finishSuccess];
-        NSLog(@"[CRACK] finishSuccess original done");
-    }
+    });
 }
-
-// setRuntimeLicenseOK: → 强制 YES
-- (void)crack_setRuntimeLicenseOK:(BOOL)val {
-    @autoreleasepool {
-        [(id)self crack_setRuntimeLicenseOK:YES];
-    }
-}
-
-// nw_revokeRuntimeLicense: → 阻止
-- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg {
-    NSLog(@"[CRACK] Blocked nw_revokeRuntimeLicense:");
-}
-
-@end
-
-@implementation NwSession (Crack)
-
-// setRuntimeLicenseOK: → 强制 YES
-- (void)crack_setRuntimeLicenseOK:(BOOL)val {
-    @autoreleasepool {
-        [(id)self crack_setRuntimeLicenseOK:YES];
-    }
-}
-
-// nw_revokeRuntimeLicense: → 阻止
-- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg {
-    NSLog(@"[CRACK] Blocked nw_revokeRuntimeLicense:");
-}
-
-// nw_sessEnd:message: → 阻止
-- (void)crack_nw_sessEnd:(NSInteger)status message:(NSString *)msg {
-    NSLog(@"[CRACK] Blocked nw_sessEnd:status:");
-}
-
-// clearSession → 阻止
-- (void)crack_clearSession {
-    NSLog(@"[CRACK] Blocked clearSession");
-}
-
-// startLicenseWatchWithInterval: → 阻止
-- (void)crack_startLicenseWatchWithInterval:(double)interval {
-    NSLog(@"[CRACK] Blocked startLicenseWatch");
-}
-
-// startHeartbeatWithInterval:onResult: → 阻止
-- (void)crack_startHeartbeatWithInterval:(double)interval onResult:(id)block {
-    NSLog(@"[CRACK] Blocked startHeartbeat");
-}
-
-// showForceExitAlertWithMessage: → 阻止 (类方法)
-+ (void)crack_showForceExitAlertWithMessage:(NSString *)msg {
-    NSLog(@"[CRACK] Blocked showForceExitAlertWithMessage:");
-}
-
-@end
-
-@implementation MainRootViewController (Crack)
-
-// nw_onSessEnd: → 阻止
-- (void)crack_nw_onSessEnd:(id)notif {
-    NSLog(@"[CRACK] Blocked nw_onSessEnd:");
-}
-
-@end
 
 // ====== dylib 加载入口 ======
-// 不能用 __attribute__((constructor))，因为此时 ObjC 类还没加载完
-// 需要监听 UIApplicationDidFinishLaunchingNotification，等 app 完全启动后再 swizzle
-
-static void doSwizzle() {
-    @autoreleasepool {
-        NSLog(@"[CRACK] ===== crack.dylib doSwizzle =====");
-
-        Class panelClass = objc_getClass("NwEntryPanel");
-        NSLog(@"[CRACK] NwEntryPanel class = %@", panelClass);
-
-        if (panelClass) {
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"beginVerification"),
-                NSSelectorFromString(@"crack_beginVerification"));
-            NSLog(@"[CRACK] Swizzled beginVerification");
-
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"onActivateTap"),
-                NSSelectorFromString(@"crack_onActivateTap"));
-            NSLog(@"[CRACK] Swizzled onActivateTap");
-
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"nw_runEntryPipeline"),
-                NSSelectorFromString(@"crack_nw_runEntryPipeline"));
-            NSLog(@"[CRACK] Swizzled nw_runEntryPipeline");
-
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"finishSuccess"),
-                NSSelectorFromString(@"crack_finishSuccess"));
-            NSLog(@"[CRACK] Swizzled finishSuccess");
-
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"setRuntimeLicenseOK:"),
-                NSSelectorFromString(@"crack_setRuntimeLicenseOK:"));
-            NSLog(@"[CRACK] Swizzled setRuntimeLicenseOK:");
-
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"nw_revokeRuntimeLicense:"),
-                NSSelectorFromString(@"crack_nw_revokeRuntimeLicense:"));
-            NSLog(@"[CRACK] Swizzled nw_revokeRuntimeLicense:");
-        } else {
-            NSLog(@"[CRACK] WARNING: NwEntryPanel not found!");
-        }
-
-        Class sessionClass = objc_getClass("NwSession");
-        NSLog(@"[CRACK] NwSession class = %@", sessionClass);
-        if (sessionClass) {
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"setRuntimeLicenseOK:"),
-                NSSelectorFromString(@"crack_setRuntimeLicenseOK:"));
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"nw_revokeRuntimeLicense:"),
-                NSSelectorFromString(@"crack_nw_revokeRuntimeLicense:"));
-
-            Method sessEndMethod = class_getInstanceMethod(sessionClass,
-                NSSelectorFromString(@"nw_sessEnd:status:message:"));
-            if (sessEndMethod) {
-                swizzleMethod(sessionClass,
-                    NSSelectorFromString(@"nw_sessEnd:status:message:"),
-                    NSSelectorFromString(@"crack_nw_sessEnd:message:"));
-                NSLog(@"[CRACK] Swizzled nw_sessEnd:status:message:");
-            }
-
-            sessEndMethod = class_getInstanceMethod(sessionClass,
-                NSSelectorFromString(@"nw_sessEnd:status:"));
-            if (sessEndMethod) {
-                swizzleMethod(sessionClass,
-                    NSSelectorFromString(@"nw_sessEnd:status:"),
-                    NSSelectorFromString(@"crack_nw_sessEnd:message:"));
-                NSLog(@"[CRACK] Swizzled nw_sessEnd:status:");
-            }
-
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"clearSession"),
-                NSSelectorFromString(@"crack_clearSession"));
-            NSLog(@"[CRACK] Swizzled clearSession");
-
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"startLicenseWatchWithInterval:"),
-                NSSelectorFromString(@"crack_startLicenseWatchWithInterval:"));
-            NSLog(@"[CRACK] Swizzled startLicenseWatchWithInterval:");
-
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"startHeartbeatWithInterval:onResult:"),
-                NSSelectorFromString(@"crack_startHeartbeatWithInterval:onResult:"));
-            NSLog(@"[CRACK] Swizzled startHeartbeatWithInterval:onResult:");
-
-            swizzleClassMethod(sessionClass,
-                NSSelectorFromString(@"showForceExitAlertWithMessage:"),
-                NSSelectorFromString(@"crack_showForceExitAlertWithMessage:"));
-            NSLog(@"[CRACK] Swizzled showForceExitAlertWithMessage:");
-        } else {
-            NSLog(@"[CRACK] WARNING: NwSession not found!");
-        }
-
-        Class rootClass = objc_getClass("MainRootViewController");
-        NSLog(@"[CRACK] MainRootViewController class = %@", rootClass);
-        if (rootClass) {
-            swizzleMethod(rootClass,
-                NSSelectorFromString(@"nw_onSessEnd:"),
-                NSSelectorFromString(@"crack_nw_onSessEnd:"));
-            NSLog(@"[CRACK] Swizzled nw_onSessEnd:");
-        }
-
-        NSLog(@"[CRACK] ===== All swizzles done =====");
-    }
-}
-
-// 监听 app 启动完成通知
-static void onAppLaunch(CFNotificationCenterRef center,
-                        void *observer,
-                        CFStringRef name,
-                        const void *object,
-                        CFDictionaryRef userInfo) {
-    NSLog(@"[CRACK] App did finish launching, starting swizzle...");
-    doSwizzle();
-    // 移除观察者（只需要执行一次）
-    CFNotificationCenterRemoveObserver(
-        CFNotificationCenterGetLocalCenter(),
-        observer,
-        name,
-        NULL);
-}
-
 __attribute__((constructor))
 static void crack_init(int argc, const char **argv) {
     @autoreleasepool {
-        NSLog(@"[CRACK] ===== crack.dylib loaded =====");
+        NSLog(@"[CRACK] ===== crack.dylib loaded (simple test version) =====");
 
-        // 此时 ObjC 类可能还没加载完
-        // 先尝试直接 swizzle，如果类已存在
-        Class panelClass = objc_getClass("NwEntryPanel");
-        if (panelClass) {
-            NSLog(@"[CRACK] Classes already loaded, swizzle now");
-            doSwizzle();
-        } else {
-            NSLog(@"[CRACK] Classes not loaded yet, waiting for app launch...");
-            // 监听 UIApplicationDidFinishLaunchingNotification
-            // 等通知到达后再 swizzle
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetLocalCenter(),
-                NULL,
-                onAppLaunch,
-                CFSTR("UIApplicationDidFinishLaunchingNotification"),
-                NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately);
-        }
+        // 延迟 2 秒后弹出卡密界面，确保 UI 完全初始化
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            showKamiView();
+        });
     }
 }
