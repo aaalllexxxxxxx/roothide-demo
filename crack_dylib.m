@@ -1,8 +1,7 @@
 // crack_dylib.m
-// 用系统自带 UIAlertController 弹窗输入卡密
+// 单纯卡密验证弹窗（系统 UIAlertController）
 // - 首次进入需要输入卡密，验证通过后持久化（NSUserDefaults）
-// - 验证成功后弹"获取更多破解软件"窗口，可选"知道了"或"以后不再提示"
-// - 卡密错误窗口有"获取卡密"按钮跳转淘宝链接
+// - 卡密错误提示重新输入，不跳转任何链接
 //
 // 编译:
 // clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit \
@@ -17,8 +16,6 @@
 // ====== 常量 ======
 static NSString *const KAMI_CORRECT = @"XianyuWeihuabinggan";
 static NSString *const KEY_KAMI_VERIFIED = @"crack_kami_verified";
-static NSString *const KEY_SKIP_PROMO = @"crack_skip_promo";
-static NSString *const TB_URL = @"https://m.tb.cn/h.8j1x0aY?tk=pUyOTc0PWG7";
 
 // ====== 全局引用 ======
 static UIWindow *g_crackWindow = nil;
@@ -29,20 +26,6 @@ static UIWindow *g_crackWindow = nil;
 
 @implementation CrackViewController
 @end
-
-// ====== 跳转 URL ======
-static void openURL(NSString *urlString) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            NSURL *url = [NSURL URLWithString:urlString];
-            if (url) {
-                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL success) {
-                    NSLog(@"[CRACK] openURL %@ success=%d", urlString, success);
-                }];
-            }
-        }
-    });
-}
 
 // ====== 获取或创建独立窗口 ======
 static UIViewController *getCrackRootVC() {
@@ -62,63 +45,6 @@ static UIViewController *getCrackRootVC() {
     return g_crackWindow.rootViewController;
 }
 
-// ====== 弹出"获取更多破解软件"窗口 ======
-static void showPromoAlert() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            NSLog(@"[CRACK] showPromoAlert");
-
-            UIViewController *rootVC = getCrackRootVC();
-            if (rootVC.presentedViewController) {
-                NSLog(@"[CRACK] promo: alert already showing, skip");
-                return;
-            }
-
-            UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:@"获取更多破解软件"
-                                 message:@"更多精彩破解软件等你来发现"
-                          preferredStyle:UIAlertControllerStyleAlert];
-
-            // 跳转按钮
-            UIAlertAction *goAction = [UIAlertAction
-                actionWithTitle:@"获取卡密"
-                          style:UIAlertActionStyleDefault
-                        handler:^(UIAlertAction *action) {
-                    NSLog(@"[CRACK] promo: open taobao");
-                    openURL(TB_URL);
-                    // 跳转后隐藏窗口
-                    g_crackWindow.hidden = YES;
-                }];
-
-            // 知道了
-            UIAlertAction *okAction = [UIAlertAction
-                actionWithTitle:@"知道了"
-                          style:UIAlertActionStyleDefault
-                        handler:^(UIAlertAction *action) {
-                    NSLog(@"[CRACK] promo: ok");
-                    g_crackWindow.hidden = YES;
-                }];
-
-            // 以后不再提示
-            UIAlertAction *skipAction = [UIAlertAction
-                actionWithTitle:@"以后不再提示"
-                          style:UIAlertActionStyleCancel
-                        handler:^(UIAlertAction *action) {
-                    NSLog(@"[CRACK] promo: skip forever");
-                    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_SKIP_PROMO];
-                    [[NSUserDefaults standardUserDefaults] synchronize];
-                    g_crackWindow.hidden = YES;
-                }];
-
-            [alert addAction:goAction];
-            [alert addAction:okAction];
-            [alert addAction:skipAction];
-
-            [rootVC presentViewController:alert animated:YES completion:nil];
-        }
-    });
-}
-
 // ====== 弹出卡密输入弹窗 ======
 static void showKamiAlert() {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -128,17 +54,7 @@ static void showKamiAlert() {
             // 检查是否已验证过（持久化）
             BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
             if (alreadyVerified) {
-                NSLog(@"[CRACK] already verified (persisted), skip kami input");
-
-                // 检查是否需要弹推广窗口
-                BOOL skipPromo = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_SKIP_PROMO];
-                if (!skipPromo) {
-                    NSLog(@"[CRACK] showing promo alert");
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        showPromoAlert();
-                    });
-                }
+                NSLog(@"[CRACK] already verified (persisted), skip");
                 return;
             }
 
@@ -176,22 +92,16 @@ static void showKamiAlert() {
                         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_KAMI_VERIFIED];
                         [[NSUserDefaults standardUserDefaults] synchronize];
                         NSLog(@"[CRACK] kami correct! persisted.");
-
-                        // 弹出推广窗口
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                                       dispatch_get_main_queue(), ^{
-                            showPromoAlert();
-                        });
+                        g_crackWindow.hidden = YES;
 
                     } else {
                         // 卡密错误
                         NSLog(@"[CRACK] kami wrong, retry");
                         UIAlertController *errorAlert = [UIAlertController
                             alertControllerWithTitle:@"卡密错误"
-                                             message:@"请联系闲鱼威化饼干获取卡密"
+                                             message:@"卡密不正确，请重新输入"
                                       preferredStyle:UIAlertControllerStyleAlert];
 
-                        // 重新输入
                         UIAlertAction *retryAction = [UIAlertAction
                             actionWithTitle:@"重新输入"
                                       style:UIAlertActionStyleDefault
@@ -202,23 +112,7 @@ static void showKamiAlert() {
                                 });
                             }];
 
-                        // 获取卡密 - 跳转淘宝
-                        UIAlertAction *getKamiAction = [UIAlertAction
-                            actionWithTitle:@"获取卡密"
-                                      style:UIAlertActionStyleDefault
-                                    handler:^(UIAlertAction *a) {
-                                NSLog(@"[CRACK] open taobao for kami");
-                                openURL(TB_URL);
-                                // 跳转后重新弹卡密输入
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                                               dispatch_get_main_queue(), ^{
-                                    showKamiAlert();
-                                });
-                            }];
-
                         [errorAlert addAction:retryAction];
-                        [errorAlert addAction:getKamiAction];
-
                         [rootVC presentViewController:errorAlert animated:YES completion:nil];
                     }
                 }];
