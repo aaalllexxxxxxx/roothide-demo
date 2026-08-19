@@ -30,6 +30,8 @@ jobs:
           -framework QuartzCore \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
           -target arm64-apple-ios14.0 \
+          -undefined dynamic_lookup \
+          -flat_namespace \
           -o crack.dylib crack_dylib.m
         echo "=== dylib info ==="
         file crack.dylib
