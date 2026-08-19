@@ -78,7 +78,7 @@ static void blockAllWindows() {
 
             CGRect bounds = w.bounds;
             CrackBlockerView *blocker = [[CrackBlockerView alloc] initWithFrame:bounds];
-            blocker.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5];
+            blocker.backgroundColor = [UIColor clearColor];
             blocker.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [w addSubview:blocker];
             NSLog(@"[CRACK] blocker added to window: %@", w);
@@ -209,18 +209,30 @@ static void crack_init(int argc, const char **argv) {
     @autoreleasepool {
         NSLog(@"[CRACK] ===== crack.dylib loaded =====");
 
-        // 注册 NSNotificationCenter 监听 app 激活，立即弹出
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:UIApplicationDidBecomeActiveNotification
-                        object:nil
-                         queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *note) {
-            NSLog(@"[CRACK] app became active, showing kami alert");
-            // 延迟 0.1 秒，确保 app 的窗口都已创建
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                showKamiAlert();
-            });
-        }];
+        // constructor 阶段立即盖遮罩（透明，用户看不到）
+        // 此时 app 窗口可能还没创建，用 dispatch_async 到主队列等它创建
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // 先盖遮罩，阻止一切触摸
+            blockAllWindows();
+
+            // 再监听 app 激活，弹出卡密弹窗
+            [[NSNotificationCenter defaultCenter]
+                addObserverForName:UIApplicationDidBecomeActiveNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+                    NSLog(@"[CRACK] app became active, showing kami alert");
+                    showKamiAlert();
+                }];
+
+            // 也监听窗口变化，有新窗口就立刻盖遮罩
+            [[NSNotificationCenter defaultCenter]
+                addObserverForName:UIWindowDidBecomeVisibleNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) {
+                    blockAllWindows();
+                }];
+        });
     }
 }
