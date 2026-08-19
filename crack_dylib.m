@@ -20,6 +20,7 @@ static NSString *const KEY_KAMI_VERIFIED = @"crack_kami_verified";
 
 // ====== 全局引用 ======
 static UIWindow *g_crackWindow = nil;
+static BOOL g_alertShowing = NO;
 
 // ====== 空的 ViewController（给 UIWindow 用） ======
 @interface CrackViewController : UIViewController
@@ -48,92 +49,99 @@ static UIViewController *getCrackRootVC() {
 
 // ====== 弹出卡密输入弹窗 ======
 static void showKamiAlert() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            NSLog(@"[CRACK] showKamiAlert");
+    @autoreleasepool {
+        NSLog(@"[CRACK] showKamiAlert");
 
-            // 检查是否已验证过（持久化）
-            BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
-            if (alreadyVerified) {
-                NSLog(@"[CRACK] already verified (persisted), skip");
-                return;
-            }
+        // 检查是否已验证过（持久化）
+        BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
+        if (alreadyVerified) {
+            NSLog(@"[CRACK] already verified (persisted), skip");
+            return;
+        }
 
-            UIViewController *rootVC = getCrackRootVC();
-            if (rootVC.presentedViewController) {
-                NSLog(@"[CRACK] alert already showing, skip");
-                return;
-            }
+        // 防止重复弹出
+        if (g_alertShowing) {
+            NSLog(@"[CRACK] alert already showing, skip");
+            return;
+        }
 
-            // 创建卡密输入弹窗
-            UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:@"PUBG HUD"
-                                 message:@"请输入卡密"
-                          preferredStyle:UIAlertControllerStyleAlert];
+        UIViewController *rootVC = getCrackRootVC();
+        if (rootVC.presentedViewController) {
+            NSLog(@"[CRACK] something already presented, skip");
+            return;
+        }
 
-            // 添加输入框
-            [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-                textField.placeholder = @"输入卡密";
-                textField.secureTextEntry = YES;
-                textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-                textField.autocorrectionType = UITextAutocorrectionTypeNo;
-                textField.font = [UIFont systemFontOfSize:16];
+        g_alertShowing = YES;
+
+        // 创建卡密输入弹窗
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"PUBG HUD"
+                             message:@"请输入卡密"
+                      preferredStyle:UIAlertControllerStyleAlert];
+
+        // 添加输入框
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+            textField.placeholder = @"输入卡密";
+            textField.secureTextEntry = YES;
+            textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+            textField.autocorrectionType = UITextAutocorrectionTypeNo;
+            textField.font = [UIFont systemFontOfSize:16];
+        }];
+
+        // 激活按钮
+        UIAlertAction *verifyAction = [UIAlertAction
+            actionWithTitle:@"激 活"
+                      style:UIAlertActionStyleDefault
+                    handler:^(UIAlertAction *action) {
+                g_alertShowing = NO;
+                NSString *input = alert.textFields.firstObject.text;
+                NSLog(@"[CRACK] input: %@", input);
+
+                if ([input isEqualToString:KAMI_CORRECT]) {
+                    // 卡密正确 - 持久化保存
+                    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_KAMI_VERIFIED];
+                    [[NSUserDefaults standardUserDefaults] synchronize];
+                    NSLog(@"[CRACK] kami correct! persisted.");
+                    g_crackWindow.hidden = YES;
+
+                } else {
+                    // 卡密错误
+                    NSLog(@"[CRACK] kami wrong, retry");
+                    UIAlertController *errorAlert = [UIAlertController
+                        alertControllerWithTitle:@"卡密错误"
+                                         message:@"卡密不正确，请重新输入"
+                                  preferredStyle:UIAlertControllerStyleAlert];
+
+                    UIAlertAction *retryAction = [UIAlertAction
+                        actionWithTitle:@"重新输入"
+                                  style:UIAlertActionStyleDefault
+                                handler:^(UIAlertAction *a) {
+                            // 立即重新弹窗，不延迟
+                            showKamiAlert();
+                        }];
+
+                    [errorAlert addAction:retryAction];
+                    [rootVC presentViewController:errorAlert animated:NO completion:nil];
+                }
             }];
 
-            // 激活按钮
-            UIAlertAction *verifyAction = [UIAlertAction
-                actionWithTitle:@"激 活"
-                          style:UIAlertActionStyleDefault
-                        handler:^(UIAlertAction *action) {
-                    NSString *input = alert.textFields.firstObject.text;
-                    NSLog(@"[CRACK] input: %@", input);
+        // 取消按钮 → 立即闪退
+        UIAlertAction *cancelAction = [UIAlertAction
+            actionWithTitle:@"取消"
+                      style:UIAlertActionStyleCancel
+                    handler:^(UIAlertAction *action) {
+                NSLog(@"[CRACK] user cancelled, crash exit");
+                // 立即闪退，不等动画
+                abort();
+            }];
 
-                    if ([input isEqualToString:KAMI_CORRECT]) {
-                        // 卡密正确 - 持久化保存
-                        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_KAMI_VERIFIED];
-                        [[NSUserDefaults standardUserDefaults] synchronize];
-                        NSLog(@"[CRACK] kami correct! persisted.");
-                        g_crackWindow.hidden = YES;
+        [alert addAction:verifyAction];
+        [alert addAction:cancelAction];
 
-                    } else {
-                        // 卡密错误
-                        NSLog(@"[CRACK] kami wrong, retry");
-                        UIAlertController *errorAlert = [UIAlertController
-                            alertControllerWithTitle:@"卡密错误"
-                                             message:@"卡密不正确，请重新输入"
-                                      preferredStyle:UIAlertControllerStyleAlert];
-
-                        UIAlertAction *retryAction = [UIAlertAction
-                            actionWithTitle:@"重新输入"
-                                      style:UIAlertActionStyleDefault
-                                    handler:^(UIAlertAction *a) {
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                                               dispatch_get_main_queue(), ^{
-                                    showKamiAlert();
-                                });
-                            }];
-
-                        [errorAlert addAction:retryAction];
-                        [rootVC presentViewController:errorAlert animated:YES completion:nil];
-                    }
-                }];
-
-            // 取消按钮 → 闪退
-            UIAlertAction *cancelAction = [UIAlertAction
-                actionWithTitle:@"取消"
-                          style:UIAlertActionStyleCancel
-                        handler:^(UIAlertAction *action) {
-                    NSLog(@"[CRACK] user cancelled, crash exit");
-                    abort();
-                }];
-
-            [alert addAction:verifyAction];
-            [alert addAction:cancelAction];
-
-            [rootVC presentViewController:alert animated:YES completion:nil];
-            NSLog(@"[CRACK] alert presented");
-        }
-    });
+        // animated:NO 去掉弹出动画延迟
+        [rootVC presentViewController:alert animated:NO completion:nil];
+        NSLog(@"[CRACK] alert presented");
+    }
 }
 
 // ====== dylib 加载入口 ======
@@ -142,10 +150,15 @@ static void crack_init(int argc, const char **argv) {
     @autoreleasepool {
         NSLog(@"[CRACK] ===== crack.dylib loaded =====");
 
-        // 延迟 0.5 秒弹出卡密界面，等主线程 runloop 启动
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
+        // 注册 NSNotificationCenter 监听 app 激活，立即弹出
+        // 比 dispatch_after 更快，app 一激活就弹
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+            NSLog(@"[CRACK] app became active, showing kami alert");
             showKamiAlert();
-        });
+        }];
     }
 }
