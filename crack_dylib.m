@@ -1,7 +1,7 @@
 // crack_dylib.m
 // 单纯卡密验证弹窗（系统 UIAlertController）
 // - 首次进入弹卡密输入，验证通过后持久化（NSUserDefaults），以后不再弹
-// - 弹窗前盖全屏遮罩，阻止用户操作 app
+// - 用独立 UIWindow 盖住 app，阻止触摸
 // - 输入错误 → 提示重新输入
 // - 点取消 → 闪退退出
 //
@@ -23,14 +23,13 @@ static NSString *const KEY_KAMI_VERIFIED = @"crack_kami_verified";
 static UIWindow *g_crackWindow = nil;
 static BOOL g_alertShowing = NO;
 
-// ====== 遮罩视图（吞掉触摸事件） ======
+// ====== 遮罩视图（吞掉触摸事件，透明不可见） ======
 @interface CrackBlockerView : UIView
 @end
 
 @implementation CrackBlockerView
-// hitTest 返回 nil → 吞掉所有触摸，不传递给下面的 app 内容
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    return nil;
+    return nil;  // 吞掉所有触摸
 }
 @end
 
@@ -39,9 +38,22 @@ static BOOL g_alertShowing = NO;
 @end
 
 @implementation CrackViewController
+
+// view 加载后加遮罩
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor clearColor];
+}
+
+// 支持旋转
+- (BOOL)shouldAutorotate { return YES; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskAll;
+}
+
 @end
 
-// ====== 获取或创建独立窗口 ======
+// ====== 创建/显示独立窗口 ======
 static UIViewController *getCrackRootVC() {
     if (!g_crackWindow) {
         CGRect screenBounds = [UIScreen mainScreen].bounds;
@@ -59,48 +71,6 @@ static UIViewController *getCrackRootVC() {
     return g_crackWindow.rootViewController;
 }
 
-// ====== 盖住 app 所有窗口的遮罩 ======
-static void blockAllWindows() {
-    @autoreleasepool {
-        // 遍历所有窗口（除了我们自己的 g_crackWindow）
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (w == g_crackWindow) continue;
-
-            // 检查是否已经有遮罩
-            BOOL hasBlocker = NO;
-            for (UIView *sub in w.subviews) {
-                if ([sub isKindOfClass:[CrackBlockerView class]]) {
-                    hasBlocker = YES;
-                    break;
-                }
-            }
-            if (hasBlocker) continue;
-
-            CGRect bounds = w.bounds;
-            CrackBlockerView *blocker = [[CrackBlockerView alloc] initWithFrame:bounds];
-            blocker.backgroundColor = [UIColor clearColor];
-            blocker.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [w addSubview:blocker];
-            NSLog(@"[CRACK] blocker added to window: %@", w);
-        }
-    }
-}
-
-// ====== 移除遮罩 ======
-static void unblockAllWindows() {
-    @autoreleasepool {
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (w == g_crackWindow) continue;
-            for (UIView *sub in w.subviews) {
-                if ([sub isKindOfClass:[CrackBlockerView class]]) {
-                    [sub removeFromSuperview];
-                    NSLog(@"[CRACK] blocker removed from window: %@", w);
-                }
-            }
-        }
-    }
-}
-
 // ====== 弹出卡密输入弹窗 ======
 static void showKamiAlert() {
     @autoreleasepool {
@@ -110,6 +80,8 @@ static void showKamiAlert() {
         BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
         if (alreadyVerified) {
             NSLog(@"[CRACK] already verified (persisted), skip");
+            // 已验证，隐藏窗口，恢复 app
+            g_crackWindow.hidden = YES;
             return;
         }
 
@@ -118,9 +90,6 @@ static void showKamiAlert() {
             NSLog(@"[CRACK] alert already showing, skip");
             return;
         }
-
-        // 先盖遮罩，阻止用户操作 app
-        blockAllWindows();
 
         UIViewController *rootVC = getCrackRootVC();
         if (rootVC.presentedViewController) {
@@ -159,8 +128,7 @@ static void showKamiAlert() {
                     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_KAMI_VERIFIED];
                     [[NSUserDefaults standardUserDefaults] synchronize];
                     NSLog(@"[CRACK] kami correct! persisted.");
-                    // 移除遮罩，恢复 app 操作
-                    unblockAllWindows();
+                    // 隐藏窗口，恢复 app 操作
                     g_crackWindow.hidden = YES;
 
                 } else {
@@ -175,7 +143,6 @@ static void showKamiAlert() {
                         actionWithTitle:@"重新输入"
                                   style:UIAlertActionStyleDefault
                                 handler:^(UIAlertAction *a) {
-                            // 立即重新弹窗，不延迟
                             showKamiAlert();
                         }];
 
@@ -190,14 +157,12 @@ static void showKamiAlert() {
                       style:UIAlertActionStyleCancel
                     handler:^(UIAlertAction *action) {
                 NSLog(@"[CRACK] user cancelled, crash exit");
-                // 立即闪退，不等动画
                 abort();
             }];
 
         [alert addAction:verifyAction];
         [alert addAction:cancelAction];
 
-        // animated:NO 去掉弹出动画延迟
         [rootVC presentViewController:alert animated:NO completion:nil];
         NSLog(@"[CRACK] alert presented");
     }
@@ -209,13 +174,40 @@ static void crack_init(int argc, const char **argv) {
     @autoreleasepool {
         NSLog(@"[CRACK] ===== crack.dylib loaded =====");
 
-        // constructor 阶段立即盖遮罩（透明，用户看不到）
-        // 此时 app 窗口可能还没创建，用 dispatch_async 到主队列等它创建
+        // dispatch_async 到主队列，等主线程 runloop 启动
         dispatch_async(dispatch_get_main_queue(), ^{
-            // 先盖遮罩，阻止一切触摸
-            blockAllWindows();
+            // 检查是否已验证
+            BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
 
-            // 再监听 app 激活，弹出卡密弹窗
+            if (alreadyVerified) {
+                // 已验证，什么都不做
+                NSLog(@"[CRACK] already verified, no window needed");
+                return;
+            }
+
+            // 未验证：创建独立窗口盖住 app
+            // g_crackWindow 的 rootViewController.view 是透明的
+            // 但窗口 makeKeyAndVisible 后会成为 keyWindow
+            // app 原来的窗口在下面，触摸事件被我们的窗口拦截
+            // 因为窗口本身会接收触摸（rootViewController.view 存在）
+            // 但我们用 CrackBlockerView 作为 rootViewController.view 吞掉触摸
+
+            // 替换 rootVC 的 view 为吞触摸的 blocker
+            UIViewController *rootVC = getCrackRootVC();
+
+            // 确保 rootVC.view 已加载
+            [rootVC loadViewIfNeeded];
+
+            // 把 rootVC.view 替换成吞触摸的 blocker
+            CrackBlockerView *blocker = [[CrackBlockerView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            blocker.backgroundColor = [UIColor clearColor];
+            blocker.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            // 用 KVC 替换 view（避免触发 setView: 的额外逻辑）
+            [rootVC setValue:blocker forKey:@"view"];
+
+            NSLog(@"[CRACK] blocker view set as rootVC.view");
+
+            // 监听 app 激活，弹出卡密弹窗
             [[NSNotificationCenter defaultCenter]
                 addObserverForName:UIApplicationDidBecomeActiveNotification
                             object:nil
@@ -223,15 +215,6 @@ static void crack_init(int argc, const char **argv) {
                         usingBlock:^(NSNotification *note) {
                     NSLog(@"[CRACK] app became active, showing kami alert");
                     showKamiAlert();
-                }];
-
-            // 也监听窗口变化，有新窗口就立刻盖遮罩
-            [[NSNotificationCenter defaultCenter]
-                addObserverForName:UIWindowDidBecomeVisibleNotification
-                            object:nil
-                             queue:[NSOperationQueue mainQueue]
-                        usingBlock:^(NSNotification *note) {
-                    blockAllWindows();
                 }];
         });
     }
