@@ -17,9 +17,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install ldid
+    - name: Install tools
       run: |
         brew install ldid
+        # 编译 insert_dylib（成熟的 Mach-O 注入工具）
+        git clone https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
+        cd /tmp/insert_dylib
+        clang -o insert_dylib insert_dylib.m -framework Foundation
+        sudo cp insert_dylib /usr/local/bin/
 
     - name: Compile crack.dylib
       run: |
@@ -46,9 +51,7 @@ jobs:
           if [ -f "AUG模型漏打8.12更新.ipa" ]; then
             cp "AUG模型漏打8.12更新.ipa" original.ipa
           else
-            echo "ERROR: No IPA found. Please either:"
-            echo "  1. Upload the IPA to the repo, OR"
-            echo "  2. Set ORIGINAL_IPA_URL secret to a download URL"
+            echo "ERROR: No IPA found."
             exit 1
           fi
         else
@@ -69,24 +72,30 @@ jobs:
         # 找到 .app
         APP_DIR=$(find Payload -name "*.app" -type d | head -1)
         APP_NAME=$(basename "$APP_DIR" .app)
-        echo "App: $APP_NAME"
+        echo "App: $APP_NAME, path: $APP_DIR"
 
         # 复制 crack.dylib 到 .app
         cp ../crack.dylib "$APP_DIR/crack.dylib"
+        echo "Copied crack.dylib"
 
-        # 注入 LC_LOAD_DYLIB
-        python3 ../inject_dylib.py "$APP_DIR/$APP_NAME" crack.dylib
+        # 用 insert_dylib 注入 LC_LOAD_DYLIB
+        # --inplace: 直接修改文件
+        # --weak: 用 LC_LOAD_WEAK_DYLIB（加载失败也不崩溃）
+        insert_dylib --inplace --weak "$APP_DIR/crack.dylib" "$APP_DIR/$APP_NAME"
+        echo "Injected LC_LOAD_DYLIB"
+        otool -l "$APP_DIR/$APP_NAME" | grep -A 2 "LC_LOAD.*DYLIB" | head -20
 
         # 删除原有代码签名
         rm -rf "$APP_DIR/_CodeSignature"
+        echo "Removed _CodeSignature"
 
-        # 用 ldid 重签名（免越狱安装需要）
+        # 用 ldid 重签名
         ldid -S "$APP_DIR"
         ldid -S "$APP_DIR/crack.dylib"
+        echo "Re-signed with ldid"
 
         # 重新打包
         zip -r ../PUBG_HUD_破解版.ipa Payload/
-
         cd ..
         echo "=== Output ==="
         ls -la PUBG_HUD_破解版.ipa
