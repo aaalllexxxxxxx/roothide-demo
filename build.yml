@@ -1,0 +1,104 @@
+name: Build Cracked IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'crack_dylib.m'
+      - 'inject_dylib.py'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install ldid
+      run: |
+        brew install ldid
+
+    - name: Compile crack.dylib
+      run: |
+        clang -arch arm64 \
+          -dynamiclib \
+          -framework Foundation \
+          -framework UIKit \
+          -framework QuartzCore \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 \
+          -o crack.dylib crack_dylib.m
+        echo "=== dylib info ==="
+        file crack.dylib
+        otool -L crack.dylib
+
+    - name: Download original IPA
+      env:
+        ORIGINAL_IPA_URL: ${{ secrets.ORIGINAL_IPA_URL }}
+      run: |
+        if [ -z "$ORIGINAL_IPA_URL" ]; then
+          echo "ORIGINAL_IPA_URL secret not set, checking if IPA exists in repo..."
+          if [ -f "AUG模型漏打8.12更新.ipa" ]; then
+            cp "AUG模型漏打8.12更新.ipa" original.ipa
+          else
+            echo "ERROR: No IPA found. Please either:"
+            echo "  1. Upload the IPA to the repo, OR"
+            echo "  2. Set ORIGINAL_IPA_URL secret to a download URL"
+            exit 1
+          fi
+        else
+          curl -L -o original.ipa "$ORIGINAL_IPA_URL"
+        fi
+        echo "=== IPA info ==="
+        ls -la original.ipa
+
+    - name: Inject dylib and build IPA
+      run: |
+        # 创建工作目录
+        mkdir -p build_temp
+        cd build_temp
+
+        # 解压 IPA
+        unzip -o ../original.ipa
+
+        # 找到 .app
+        APP_DIR=$(find Payload -name "*.app" -type d | head -1)
+        APP_NAME=$(basename "$APP_DIR" .app)
+        echo "App: $APP_NAME"
+
+        # 复制 crack.dylib 到 .app
+        cp ../crack.dylib "$APP_DIR/crack.dylib"
+
+        # 注入 LC_LOAD_DYLIB
+        python3 ../inject_dylib.py "$APP_DIR/$APP_NAME" crack.dylib
+
+        # 删除原有代码签名
+        rm -rf "$APP_DIR/_CodeSignature"
+
+        # 用 ldid 重签名（免越狱安装需要）
+        ldid -S "$APP_DIR"
+        ldid -S "$APP_DIR/crack.dylib"
+
+        # 重新打包
+        zip -r ../PUBG_HUD_破解版.ipa Payload/
+
+        cd ..
+        echo "=== Output ==="
+        ls -la PUBG_HUD_破解版.ipa
+
+    - name: Upload cracked IPA
+      uses: actions/upload-artifact@v4
+      with:
+        name: PUBG_HUD_破解版_IPA
+        path: PUBG_HUD_破解版.ipa
+        retention-days: 90
+
+    - name: Upload crack.dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: crack-dylib
+        path: crack.dylib
+        retention-days: 90
