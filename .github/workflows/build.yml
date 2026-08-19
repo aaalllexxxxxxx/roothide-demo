@@ -23,7 +23,10 @@ jobs:
         # 编译 insert_dylib（成熟的 Mach-O 注入工具）
         git clone https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
         cd /tmp/insert_dylib
-        clang -o insert_dylib insert_dylib.m -framework Foundation
+        # 自动找到源码文件（可能是 .c 或 .m，可能在子目录里）
+        SRC=$(find . -name "insert_dylib.c" -o -name "insert_dylib.m" | head -1)
+        echo "Found source: $SRC"
+        clang -o insert_dylib "$SRC" -framework Foundation
         sudo cp insert_dylib /usr/local/bin/
 
     - name: Compile crack.dylib
