@@ -1,9 +1,6 @@
 // crack_dylib.m
 // 完整版：卡密验证弹窗 + PUBG HUD 绕过验证
-// - app 启动时立即安装 swizzle（不等卡密验证）
-// - 独立 UIWindow 盖住 app，阻止触摸
-// - 弹卡密输入弹窗，输入正确才解锁
-// - 持久化：验证过后不再弹窗
+// 用 IMP hook（类似 Frida Interceptor.replace）而非 method_exchange
 //
 // 编译:
 // clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit \
@@ -35,7 +32,6 @@ static NSString *const KEY_KAMI_VERIFIED = @"crack_kami_verified";
 + (BOOL)runtimeLicenseOK;
 - (void)setRuntimeLicenseOK:(BOOL)val;
 - (void)nw_revokeRuntimeLicense:(BOOL)arg;
-- (void)nw_sessEnd:(NSInteger)status message:(NSString *)msg;
 - (void)clearSession;
 - (void)startLicenseWatchWithInterval:(double)interval;
 - (void)startHeartbeatWithInterval:(double)interval onResult:(id)block;
@@ -62,7 +58,20 @@ static BOOL g_bypassInstalled = NO;
 static BOOL g_finishSuccessDone = NO;
 static BOOL g_injected = NO;
 
-// ====== 遮罩视图（吞掉触摸事件，透明不可见） ======
+// 保存原始 IMP
+static IMP g_orig_beginVerification = NULL;
+static IMP g_orig_onActivateTap = NULL;
+static IMP g_orig_nw_runEntryPipeline = NULL;
+static IMP g_orig_finishSuccess = NULL;
+static IMP g_orig_setRuntimeLicenseOK = NULL;
+static IMP g_orig_nw_revokeRuntimeLicense = NULL;
+static IMP g_orig_clearSession = NULL;
+static IMP g_orig_startLicenseWatch = NULL;
+static IMP g_orig_startHeartbeat = NULL;
+static IMP g_orig_showForceExitAlert = NULL;
+static IMP g_orig_nw_onSessEnd = NULL;
+
+// ====== 遮罩视图 ======
 @interface CrackBlockerView : UIView
 @end
 
@@ -72,7 +81,7 @@ static BOOL g_injected = NO;
 }
 @end
 
-// ====== 空的 ViewController（给 UIWindow 用） ======
+// ====== 空的 ViewController ======
 @interface CrackViewController : UIViewController
 @end
 
@@ -130,7 +139,6 @@ static void injectOffsetsAndFeature() {
     @autoreleasepool {
         NSLog(@"[CRACK] Injecting offsets and feature config...");
 
-        // 构造 offsets 字典
         NSMutableDictionary *offsetsDict = [NSMutableDictionary dictionary];
         [offsetsDict setObject:@"0x10C464C8" forKey:@"gWorld"];
 
@@ -152,7 +160,6 @@ static void injectOffsetsAndFeature() {
             NSLog(@"[CRACK] NwGameOffsets.isReady = %d", ready);
         } @catch (NSException *e) {}
 
-        // 构造 feature config 字典
         NSMutableDictionary *featDict = [NSMutableDictionary dictionary];
         [featDict setObject:@(1) forKey:@"cfg_ver"];
         [featDict setObject:@(1) forKey:@"esp_enabled"];
@@ -172,106 +179,95 @@ static void injectOffsetsAndFeature() {
     }
 }
 
-// ====== Method Swizzle 工具 ======
-static void swizzleMethod(Class class, SEL originalSel, SEL swizzledSel) {
-    Method originalMethod = class_getInstanceMethod(class, originalSel);
-    Method swizzledMethod = class_getInstanceMethod(class, swizzledSel);
-    if (originalMethod && swizzledMethod) {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    } else {
-        NSLog(@"[CRACK] swizzleMethod FAILED: orig=%@ swizzled=%@ (origMethod=%p swizzledMethod=%p)",
-              NSStringFromSelector(originalSel), NSStringFromSelector(swizzledSel),
-              originalMethod, swizzledMethod);
+// ====== IMP hook 工具（类似 Frida Interceptor.replace） ======
+// 保存原始 IMP，用 class_replaceMethod 替换为新实现
+// 新实现里可以通过保存的 orig IMP 调用原始方法
+static IMP hookInstanceMethod(Class cls, SEL sel, IMP newImp) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        NSLog(@"[CRACK] hookInstanceMethod: method %@ not found on %@",
+              NSStringFromSelector(sel), cls);
+        return NULL;
     }
+    // 先保存原始 IMP
+    IMP origImp = method_getImplementation(m);
+    // 如果类没有实现这个方法（继承的），要先添加
+    // class_replaceMethod: 如果方法不存在会添加，如果存在会替换
+    class_replaceMethod(cls, sel, newImp, method_getTypeEncoding(m));
+    return origImp;
 }
 
-static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
-    Method originalMethod = class_getClassMethod(class, originalSel);
-    Method swizzledMethod = class_getClassMethod(class, swizzledSel);
-    if (originalMethod && swizzledMethod) {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    } else {
-        NSLog(@"[CRACK] swizzleClassMethod FAILED: orig=%@ swizzled=%@",
-              NSStringFromSelector(originalSel), NSStringFromSelector(swizzledSel));
+static IMP hookClassMethod(Class cls, SEL sel, IMP newImp) {
+    Method m = class_getClassMethod(cls, sel);
+    if (!m) {
+        NSLog(@"[CRACK] hookClassMethod: method %@ not found on %@",
+              NSStringFromSelector(sel), cls);
+        return NULL;
     }
+    IMP origImp = method_getImplementation(m);
+    // 类方法的替换需要改 meta class
+    Class metaCls = object_getClass(cls);
+    class_replaceMethod(metaCls, sel, newImp, method_getTypeEncoding(m));
+    return origImp;
 }
 
-// ====== Swizzled 方法实现 ======
+// ====== Hook 函数实现（C 函数，直接操作 IMP） ======
 
-@interface NwEntryPanel (Crack)
-- (void)crack_beginVerification;
-- (void)crack_onActivateTap;
-- (void)crack_nw_runEntryPipeline;
-- (void)crack_finishSuccess;
-@end
-
-@interface NwSession (Crack)
-- (void)crack_setRuntimeLicenseOK:(BOOL)val;
-- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg;
-- (void)crack_nw_sessEnd:(NSInteger)status message:(NSString *)msg;
-- (void)crack_clearSession;
-- (void)crack_startLicenseWatchWithInterval:(double)interval;
-- (void)crack_startHeartbeatWithInterval:(double)interval onResult:(id)block;
-+ (void)crack_showForceExitAlertWithMessage:(NSString *)msg;
-@end
-
-@interface MainRootViewController (Crack)
-- (void)crack_nw_onSessEnd:(id)notif;
-@end
-
-// ---- NwEntryPanel swizzled methods ----
-@implementation NwEntryPanel (Crack)
-
-// beginVerification → 注入数据 + finishSuccess
-- (void)crack_beginVerification {
+// beginVerification → 注入 + finishSuccess
+static void hook_beginVerification(id self, SEL _cmd) {
     @autoreleasepool {
         NSLog(@"[CRACK] beginVerification → inject + finishSuccess");
         injectOffsetsAndFeature();
         @try {
             NwEntryPanel *panel = (NwEntryPanel *)self;
             [panel setBusy:NO];
-            // 交换后，调 crack_finishSuccess 实际执行原始 finishSuccess
-            // 这里直接调 finishSuccess 会回到 crack_finishSuccess（已交换）
-            // 所以调 crack_finishSuccess 就是调原始的
-            [(id)self crack_finishSuccess];
+            // 直接调原始 finishSuccess（不经过 hook，因为我们要让它跑）
+            // 但 finishSuccess 也被 hook 了，我们用保存的 orig IMP
+            if (g_orig_finishSuccess) {
+                ((void(*)(id, SEL))g_orig_finishSuccess)(self, @selector(finishSuccess));
+            }
         } @catch (NSException *e) {
             NSLog(@"[CRACK] finishSuccess error: %@", e);
         }
     }
 }
 
-// onActivateTap → 注入数据 + finishSuccess
-- (void)crack_onActivateTap {
+// onActivateTap → 注入 + finishSuccess
+static void hook_onActivateTap(id self, SEL _cmd) {
     @autoreleasepool {
         NSLog(@"[CRACK] onActivateTap → inject + finishSuccess");
         injectOffsetsAndFeature();
         @try {
             NwEntryPanel *panel = (NwEntryPanel *)self;
             [panel setBusy:NO];
-            [(id)self crack_finishSuccess];
+            if (g_orig_finishSuccess) {
+                ((void(*)(id, SEL))g_orig_finishSuccess)(self, @selector(finishSuccess));
+            }
         } @catch (NSException *e) {
             NSLog(@"[CRACK] finishSuccess error: %@", e);
         }
     }
 }
 
-// nw_runEntryPipeline → 注入数据 + finishSuccess
-- (void)crack_nw_runEntryPipeline {
+// nw_runEntryPipeline → 注入 + finishSuccess
+static void hook_nw_runEntryPipeline(id self, SEL _cmd) {
     @autoreleasepool {
         NSLog(@"[CRACK] nw_runEntryPipeline → inject + finishSuccess");
         injectOffsetsAndFeature();
         @try {
             NwEntryPanel *panel = (NwEntryPanel *)self;
             [panel setBusy:NO];
-            [(id)self crack_finishSuccess];
+            if (g_orig_finishSuccess) {
+                ((void(*)(id, SEL))g_orig_finishSuccess)(self, @selector(finishSuccess));
+            }
         } @catch (NSException *e) {
             NSLog(@"[CRACK] finishSuccess error: %@", e);
         }
     }
 }
 
-// finishSuccess → 保护原始实现，防止重复调用 abort
-- (void)crack_finishSuccess {
+// finishSuccess → 保护，防止重复调用
+static void hook_finishSuccess(id self, SEL _cmd) {
     @autoreleasepool {
         NSLog(@"[CRACK] finishSuccess intercepted");
         if (g_finishSuccessDone) {
@@ -280,175 +276,155 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
         }
         g_finishSuccessDone = YES;
 
-        // 确保数据已注入
         injectOffsetsAndFeature();
 
-        // 调用原始实现（交换后 crack_finishSuccess 指向原始 finishSuccess）
-        [(id)self crack_finishSuccess];
-        NSLog(@"[CRACK] finishSuccess original done");
+        // 调原始实现
+        if (g_orig_finishSuccess) {
+            ((void(*)(id, SEL))g_orig_finishSuccess)(self, _cmd);
+            NSLog(@"[CRACK] finishSuccess original done");
+        } else {
+            // 没有原始实现，手动隐藏面板
+            @try {
+                NwEntryPanel *panel = (NwEntryPanel *)self;
+                [panel setBusy:NO];
+                [panel setHidden:YES];
+                NSLog(@"[CRACK] panel hidden (fallback)");
+            } @catch (NSException *e) {
+                NSLog(@"[CRACK] fallback error: %@", e);
+            }
+        }
     }
 }
 
-@end
-
-// ---- NwSession swizzled methods ----
-@implementation NwSession (Crack)
-
-- (void)crack_setRuntimeLicenseOK:(BOOL)val {
-    // 强制始终 YES
-    [(id)self crack_setRuntimeLicenseOK:YES];
+// setRuntimeLicenseOK: → 强制 YES
+static void hook_setRuntimeLicenseOK(id self, SEL _cmd, BOOL val) {
+    @autoreleasepool {
+        if (g_orig_setRuntimeLicenseOK) {
+            ((void(*)(id, SEL, BOOL))g_orig_setRuntimeLicenseOK)(self, _cmd, YES);
+        }
+    }
 }
 
-- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg {
+// nw_revokeRuntimeLicense: → 阻止
+static void hook_nw_revokeRuntimeLicense(id self, SEL _cmd, BOOL arg) {
     NSLog(@"[CRACK] Blocked nw_revokeRuntimeLicense:");
 }
 
-- (void)crack_nw_sessEnd:(NSInteger)status message:(NSString *)msg {
-    NSLog(@"[CRACK] Blocked nw_sessEnd:status:");
-}
-
-- (void)crack_clearSession {
+// clearSession → 阻止 + 重新持久化
+static void hook_clearSession(id self, SEL _cmd) {
     NSLog(@"[CRACK] Blocked clearSession");
     persistBypassData();
 }
 
-- (void)crack_startLicenseWatchWithInterval:(double)interval {
+// startLicenseWatchWithInterval: → 阻止
+static void hook_startLicenseWatch(id self, SEL _cmd, double interval) {
     NSLog(@"[CRACK] Blocked startLicenseWatch");
 }
 
-- (void)crack_startHeartbeatWithInterval:(double)interval onResult:(id)block {
+// startHeartbeatWithInterval:onResult: → 阻止
+static void hook_startHeartbeat(id self, SEL _cmd, double interval, id block) {
     NSLog(@"[CRACK] Blocked startHeartbeat");
 }
 
-+ (void)crack_showForceExitAlertWithMessage:(NSString *)msg {
+// showForceExitAlertWithMessage: → 阻止（类方法）
+static void hook_showForceExitAlert(id self, SEL _cmd, id msg) {
     NSLog(@"[CRACK] Blocked showForceExitAlertWithMessage:");
 }
 
-@end
-
-// ---- MainRootViewController swizzled methods ----
-@implementation MainRootViewController (Crack)
-
-- (void)crack_nw_onSessEnd:(id)notif {
+// nw_onSessEnd: → 阻止
+static void hook_nw_onSessEnd(id self, SEL _cmd, id notif) {
     NSLog(@"[CRACK] Blocked nw_onSessEnd:");
 }
 
-@end
-
-// ====== 安装 swizzle（带重试机制） ======
-static void installBypassSwizzles() {
+// ====== 安装 hook ======
+static void installBypassHooks() {
     if (g_bypassInstalled) return;
     g_bypassInstalled = YES;
 
     @autoreleasepool {
-        NSLog(@"[CRACK] ===== Installing bypass swizzles =====");
+        NSLog(@"[CRACK] ===== Installing bypass hooks (IMP replace) =====");
 
-        // 持久化保护数据
         persistBypassData();
 
-        // NwEntryPanel swizzle
+        // NwEntryPanel hooks
         Class panelClass = objc_getClass("NwEntryPanel");
         NSLog(@"[CRACK] NwEntryPanel class = %@", panelClass);
         if (panelClass) {
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"beginVerification"),
-                NSSelectorFromString(@"crack_beginVerification"));
-            NSLog(@"[CRACK] Swizzled beginVerification");
+            g_orig_beginVerification = hookInstanceMethod(panelClass,
+                @selector(beginVerification), (IMP)hook_beginVerification);
+            NSLog(@"[CRACK] Hooked beginVerification (orig=%p)", g_orig_beginVerification);
 
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"onActivateTap"),
-                NSSelectorFromString(@"crack_onActivateTap"));
-            NSLog(@"[CRACK] Swizzled onActivateTap");
+            g_orig_onActivateTap = hookInstanceMethod(panelClass,
+                @selector(onActivateTap), (IMP)hook_onActivateTap);
+            NSLog(@"[CRACK] Hooked onActivateTap (orig=%p)", g_orig_onActivateTap);
 
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"nw_runEntryPipeline"),
-                NSSelectorFromString(@"crack_nw_runEntryPipeline"));
-            NSLog(@"[CRACK] Swizzled nw_runEntryPipeline");
+            g_orig_nw_runEntryPipeline = hookInstanceMethod(panelClass,
+                @selector(nw_runEntryPipeline), (IMP)hook_nw_runEntryPipeline);
+            NSLog(@"[CRACK] Hooked nw_runEntryPipeline (orig=%p)", g_orig_nw_runEntryPipeline);
 
-            swizzleMethod(panelClass,
-                NSSelectorFromString(@"finishSuccess"),
-                NSSelectorFromString(@"crack_finishSuccess"));
-            NSLog(@"[CRACK] Swizzled finishSuccess");
+            // finishSuccess 必须最后 hook，因为上面的 hook 要用 g_orig_finishSuccess
+            g_orig_finishSuccess = hookInstanceMethod(panelClass,
+                @selector(finishSuccess), (IMP)hook_finishSuccess);
+            NSLog(@"[CRACK] Hooked finishSuccess (orig=%p)", g_orig_finishSuccess);
         } else {
-            NSLog(@"[CRACK] WARNING: NwEntryPanel not found! Will retry later.");
+            NSLog(@"[CRACK] WARNING: NwEntryPanel not found!");
         }
 
-        // NwSession swizzle
+        // NwSession hooks
         Class sessionClass = objc_getClass("NwSession");
         NSLog(@"[CRACK] NwSession class = %@", sessionClass);
         if (sessionClass) {
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"setRuntimeLicenseOK:"),
-                NSSelectorFromString(@"crack_setRuntimeLicenseOK:"));
+            g_orig_setRuntimeLicenseOK = hookInstanceMethod(sessionClass,
+                @selector(setRuntimeLicenseOK:), (IMP)hook_setRuntimeLicenseOK);
+            NSLog(@"[CRACK] Hooked setRuntimeLicenseOK: (orig=%p)", g_orig_setRuntimeLicenseOK);
 
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"nw_revokeRuntimeLicense:"),
-                NSSelectorFromString(@"crack_nw_revokeRuntimeLicense:"));
+            g_orig_nw_revokeRuntimeLicense = hookInstanceMethod(sessionClass,
+                @selector(nw_revokeRuntimeLicense:), (IMP)hook_nw_revokeRuntimeLicense);
+            NSLog(@"[CRACK] Hooked nw_revokeRuntimeLicense: (orig=%p)", g_orig_nw_revokeRuntimeLicense);
 
-            // 尝试两种 sessEnd 签名
-            Method m = class_getInstanceMethod(sessionClass,
-                NSSelectorFromString(@"nw_sessEnd:status:message:"));
-            if (m) {
-                swizzleMethod(sessionClass,
-                    NSSelectorFromString(@"nw_sessEnd:status:message:"),
-                    NSSelectorFromString(@"crack_nw_sessEnd:message:"));
-                NSLog(@"[CRACK] Swizzled nw_sessEnd:status:message:");
-            }
+            g_orig_clearSession = hookInstanceMethod(sessionClass,
+                @selector(clearSession), (IMP)hook_clearSession);
+            NSLog(@"[CRACK] Hooked clearSession (orig=%p)", g_orig_clearSession);
 
-            m = class_getInstanceMethod(sessionClass,
-                NSSelectorFromString(@"nw_sessEnd:status:"));
-            if (m) {
-                swizzleMethod(sessionClass,
-                    NSSelectorFromString(@"nw_sessEnd:status:"),
-                    NSSelectorFromString(@"crack_nw_sessEnd:message:"));
-                NSLog(@"[CRACK] Swizzled nw_sessEnd:status:");
-            }
+            g_orig_startLicenseWatch = hookInstanceMethod(sessionClass,
+                @selector(startLicenseWatchWithInterval:), (IMP)hook_startLicenseWatch);
+            NSLog(@"[CRACK] Hooked startLicenseWatchWithInterval: (orig=%p)", g_orig_startLicenseWatch);
 
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"clearSession"),
-                NSSelectorFromString(@"crack_clearSession"));
+            g_orig_startHeartbeat = hookInstanceMethod(sessionClass,
+                @selector(startHeartbeatWithInterval:onResult:), (IMP)hook_startHeartbeat);
+            NSLog(@"[CRACK] Hooked startHeartbeatWithInterval:onResult: (orig=%p)", g_orig_startHeartbeat);
 
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"startLicenseWatchWithInterval:"),
-                NSSelectorFromString(@"crack_startLicenseWatchWithInterval:"));
-
-            swizzleMethod(sessionClass,
-                NSSelectorFromString(@"startHeartbeatWithInterval:onResult:"),
-                NSSelectorFromString(@"crack_startHeartbeatWithInterval:onResult:"));
-
-            swizzleClassMethod(sessionClass,
-                NSSelectorFromString(@"showForceExitAlertWithMessage:"),
-                NSSelectorFromString(@"crack_showForceExitAlertWithMessage:"));
-            NSLog(@"[CRACK] NwSession swizzles done");
+            g_orig_showForceExitAlert = hookClassMethod(sessionClass,
+                @selector(showForceExitAlertWithMessage:), (IMP)hook_showForceExitAlert);
+            NSLog(@"[CRACK] Hooked showForceExitAlertWithMessage: (orig=%p)", g_orig_showForceExitAlert);
         } else {
-            NSLog(@"[CRACK] WARNING: NwSession not found! Will retry later.");
+            NSLog(@"[CRACK] WARNING: NwSession not found!");
         }
 
-        // MainRootViewController swizzle
+        // MainRootViewController hooks
         Class rootClass = objc_getClass("MainRootViewController");
         NSLog(@"[CRACK] MainRootViewController class = %@", rootClass);
         if (rootClass) {
-            swizzleMethod(rootClass,
-                NSSelectorFromString(@"nw_onSessEnd:"),
-                NSSelectorFromString(@"crack_nw_onSessEnd:"));
-            NSLog(@"[CRACK] Swizzled nw_onSessEnd:");
+            g_orig_nw_onSessEnd = hookInstanceMethod(rootClass,
+                @selector(nw_onSessEnd:), (IMP)hook_nw_onSessEnd);
+            NSLog(@"[CRACK] Hooked nw_onSessEnd: (orig=%p)", g_orig_nw_onSessEnd);
         }
 
-        NSLog(@"[CRACK] ===== All bypass swizzles installed =====");
+        NSLog(@"[CRACK] ===== All bypass hooks installed =====");
     }
 }
 
-// ====== 重试安装 swizzle（如果类还没加载） ======
+// ====== 重试安装 hook ======
 static void tryInstallBypassWithRetry() {
     @autoreleasepool {
         Class panelClass = objc_getClass("NwEntryPanel");
         Class sessionClass = objc_getClass("NwSession");
 
         if (panelClass && sessionClass) {
-            // 类已加载，直接安装
-            installBypassSwizzles();
+            installBypassHooks();
         } else {
-            NSLog(@"[CRACK] Classes not ready yet, retry in 0.5s...");
+            NSLog(@"[CRACK] Classes not ready (panel=%@ session=%@), retry in 0.5s...",
+                  panelClass, sessionClass);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 tryInstallBypassWithRetry();
@@ -462,7 +438,6 @@ static void showKamiAlert() {
     @autoreleasepool {
         NSLog(@"[CRACK] showKamiAlert");
 
-        // 检查是否已验证过（持久化）
         BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
         if (alreadyVerified) {
             NSLog(@"[CRACK] already verified (persisted), skip");
@@ -505,17 +480,14 @@ static void showKamiAlert() {
                 NSLog(@"[CRACK] input: %@", input);
 
                 if ([input isEqualToString:KAMI_CORRECT]) {
-                    // 卡密正确
                     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_KAMI_VERIFIED];
                     [[NSUserDefaults standardUserDefaults] synchronize];
                     NSLog(@"[CRACK] kami correct! persisted.");
 
-                    // 确保 swizzle 已安装（可能之前类没加载完，现在再试一次）
                     if (!g_bypassInstalled) {
-                        installBypassSwizzles();
+                        installBypassHooks();
                     }
 
-                    // 隐藏遮罩窗口
                     g_crackWindow.hidden = YES;
                     NSLog(@"[CRACK] bypass installed, window hidden");
 
@@ -561,32 +533,28 @@ static void crack_init(int argc, const char **argv) {
         NSLog(@"[CRACK] ===== crack.dylib loaded =====");
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            // ====== 1. 立即安装绕过 swizzle（带重试） ======
-            // 不管卡密验证状态如何，swizzle 必须先装好
-            // 因为 app 的 beginVerification/nw_runEntryPipeline 可能在卡密弹窗之前就调
+            // 1. 立即安装绕过 hook（带重试）
             tryInstallBypassWithRetry();
 
-            // ====== 2. 检查卡密验证状态 ======
+            // 2. 检查卡密验证状态
             BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
 
             if (alreadyVerified) {
-                // 已验证，不需要弹窗遮罩
                 NSLog(@"[CRACK] already verified, no window needed");
                 return;
             }
 
-            // 未验证：创建独立窗口盖住 app，阻止触摸
+            // 3. 未验证：创建独立窗口盖住 app
             UIViewController *rootVC = getCrackRootVC();
             [rootVC loadViewIfNeeded];
 
-            // 把 rootVC.view 替换成吞触摸的 blocker
             CrackBlockerView *blocker = [[CrackBlockerView alloc] initWithFrame:[UIScreen mainScreen].bounds];
             blocker.backgroundColor = [UIColor clearColor];
             blocker.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [rootVC setValue:blocker forKey:@"view"];
             NSLog(@"[CRACK] blocker view set as rootVC.view");
 
-            // 监听 app 激活，弹出卡密弹窗
+            // 4. 监听 app 激活，弹出卡密弹窗
             [[NSNotificationCenter defaultCenter]
                 addObserverForName:UIApplicationDidBecomeActiveNotification
                             object:nil
