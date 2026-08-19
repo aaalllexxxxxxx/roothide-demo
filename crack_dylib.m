@@ -1,10 +1,9 @@
 // crack_dylib.m
 // 完整版：卡密验证弹窗 + PUBG HUD 绕过验证
+// - app 启动时立即安装 swizzle（不等卡密验证）
 // - 独立 UIWindow 盖住 app，阻止触摸
 // - 弹卡密输入弹窗，输入正确才解锁
-// - 卡密正确后：注入 offsets + feature config + swizzle 验证管道
-// - 保护性 hook：阻止吊销/心跳/会话结束
-// - 持久化：验证过后不再弹
+// - 持久化：验证过后不再弹窗
 //
 // 编译:
 // clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit \
@@ -141,7 +140,6 @@ static void injectOffsetsAndFeature() {
         [offsetsFull setObject:@(2147483647) forKey:@"exp"];
         [offsetsFull setObject:offsetsDict forKey:@"offsets"];
 
-        // 调用 NwGameOffsets applyDictionary:
         @try {
             [NwGameOffsets applyDictionary:offsetsFull];
             NSLog(@"[CRACK] NwGameOffsets applyDictionary: injected!");
@@ -149,7 +147,6 @@ static void injectOffsetsAndFeature() {
             NSLog(@"[CRACK] NwGameOffsets applyDictionary: error: %@", e);
         }
 
-        // 检查 isReady
         @try {
             BOOL ready = [NwGameOffsets isReady];
             NSLog(@"[CRACK] NwGameOffsets.isReady = %d", ready);
@@ -161,7 +158,6 @@ static void injectOffsetsAndFeature() {
         [featDict setObject:@(1) forKey:@"esp_enabled"];
         [featDict setObject:@(2147483647) forKey:@"exp"];
 
-        // 调用 NxFeat applyDictionary:
         @try {
             [NxFeat applyDictionary:featDict];
             NSLog(@"[CRACK] NxFeat applyDictionary: injected!");
@@ -169,7 +165,6 @@ static void injectOffsetsAndFeature() {
             NSLog(@"[CRACK] NxFeat applyDictionary: error: %@", e);
         }
 
-        // 检查 NxFeat isReady
         @try {
             BOOL featReady = [NxFeat isReady];
             NSLog(@"[CRACK] NxFeat.isReady = %d", featReady);
@@ -183,6 +178,10 @@ static void swizzleMethod(Class class, SEL originalSel, SEL swizzledSel) {
     Method swizzledMethod = class_getInstanceMethod(class, swizzledSel);
     if (originalMethod && swizzledMethod) {
         method_exchangeImplementations(originalMethod, swizzledMethod);
+    } else {
+        NSLog(@"[CRACK] swizzleMethod FAILED: orig=%@ swizzled=%@ (origMethod=%p swizzledMethod=%p)",
+              NSStringFromSelector(originalSel), NSStringFromSelector(swizzledSel),
+              originalMethod, swizzledMethod);
     }
 }
 
@@ -191,6 +190,9 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
     Method swizzledMethod = class_getClassMethod(class, swizzledSel);
     if (originalMethod && swizzledMethod) {
         method_exchangeImplementations(originalMethod, swizzledMethod);
+    } else {
+        NSLog(@"[CRACK] swizzleClassMethod FAILED: orig=%@ swizzled=%@",
+              NSStringFromSelector(originalSel), NSStringFromSelector(swizzledSel));
     }
 }
 
@@ -220,6 +222,7 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
 // ---- NwEntryPanel swizzled methods ----
 @implementation NwEntryPanel (Crack)
 
+// beginVerification → 注入数据 + finishSuccess
 - (void)crack_beginVerification {
     @autoreleasepool {
         NSLog(@"[CRACK] beginVerification → inject + finishSuccess");
@@ -227,13 +230,17 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
         @try {
             NwEntryPanel *panel = (NwEntryPanel *)self;
             [panel setBusy:NO];
-            [panel finishSuccess];
+            // 交换后，调 crack_finishSuccess 实际执行原始 finishSuccess
+            // 这里直接调 finishSuccess 会回到 crack_finishSuccess（已交换）
+            // 所以调 crack_finishSuccess 就是调原始的
+            [(id)self crack_finishSuccess];
         } @catch (NSException *e) {
             NSLog(@"[CRACK] finishSuccess error: %@", e);
         }
     }
 }
 
+// onActivateTap → 注入数据 + finishSuccess
 - (void)crack_onActivateTap {
     @autoreleasepool {
         NSLog(@"[CRACK] onActivateTap → inject + finishSuccess");
@@ -241,13 +248,14 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
         @try {
             NwEntryPanel *panel = (NwEntryPanel *)self;
             [panel setBusy:NO];
-            [panel finishSuccess];
+            [(id)self crack_finishSuccess];
         } @catch (NSException *e) {
             NSLog(@"[CRACK] finishSuccess error: %@", e);
         }
     }
 }
 
+// nw_runEntryPipeline → 注入数据 + finishSuccess
 - (void)crack_nw_runEntryPipeline {
     @autoreleasepool {
         NSLog(@"[CRACK] nw_runEntryPipeline → inject + finishSuccess");
@@ -255,13 +263,14 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
         @try {
             NwEntryPanel *panel = (NwEntryPanel *)self;
             [panel setBusy:NO];
-            [panel finishSuccess];
+            [(id)self crack_finishSuccess];
         } @catch (NSException *e) {
             NSLog(@"[CRACK] finishSuccess error: %@", e);
         }
     }
 }
 
+// finishSuccess → 保护原始实现，防止重复调用 abort
 - (void)crack_finishSuccess {
     @autoreleasepool {
         NSLog(@"[CRACK] finishSuccess intercepted");
@@ -271,9 +280,10 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
         }
         g_finishSuccessDone = YES;
 
+        // 确保数据已注入
         injectOffsetsAndFeature();
 
-        // 调用原始实现
+        // 调用原始实现（交换后 crack_finishSuccess 指向原始 finishSuccess）
         [(id)self crack_finishSuccess];
         NSLog(@"[CRACK] finishSuccess original done");
     }
@@ -325,7 +335,7 @@ static void swizzleClassMethod(Class class, SEL originalSel, SEL swizzledSel) {
 
 @end
 
-// ====== 安装保护性 swizzle ======
+// ====== 安装 swizzle（带重试机制） ======
 static void installBypassSwizzles() {
     if (g_bypassInstalled) return;
     g_bypassInstalled = YES;
@@ -360,7 +370,7 @@ static void installBypassSwizzles() {
                 NSSelectorFromString(@"crack_finishSuccess"));
             NSLog(@"[CRACK] Swizzled finishSuccess");
         } else {
-            NSLog(@"[CRACK] WARNING: NwEntryPanel not found!");
+            NSLog(@"[CRACK] WARNING: NwEntryPanel not found! Will retry later.");
         }
 
         // NwSession swizzle
@@ -411,7 +421,7 @@ static void installBypassSwizzles() {
                 NSSelectorFromString(@"crack_showForceExitAlertWithMessage:"));
             NSLog(@"[CRACK] NwSession swizzles done");
         } else {
-            NSLog(@"[CRACK] WARNING: NwSession not found!");
+            NSLog(@"[CRACK] WARNING: NwSession not found! Will retry later.");
         }
 
         // MainRootViewController swizzle
@@ -428,9 +438,26 @@ static void installBypassSwizzles() {
     }
 }
 
-// ====== 弹窗逻辑 ======
-static void showKamiAlert();
+// ====== 重试安装 swizzle（如果类还没加载） ======
+static void tryInstallBypassWithRetry() {
+    @autoreleasepool {
+        Class panelClass = objc_getClass("NwEntryPanel");
+        Class sessionClass = objc_getClass("NwSession");
 
+        if (panelClass && sessionClass) {
+            // 类已加载，直接安装
+            installBypassSwizzles();
+        } else {
+            NSLog(@"[CRACK] Classes not ready yet, retry in 0.5s...");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                tryInstallBypassWithRetry();
+            });
+        }
+    }
+}
+
+// ====== 弹窗逻辑 ======
 static void showKamiAlert() {
     @autoreleasepool {
         NSLog(@"[CRACK] showKamiAlert");
@@ -483,8 +510,10 @@ static void showKamiAlert() {
                     [[NSUserDefaults standardUserDefaults] synchronize];
                     NSLog(@"[CRACK] kami correct! persisted.");
 
-                    // 安装绕过 swizzle
-                    installBypassSwizzles();
+                    // 确保 swizzle 已安装（可能之前类没加载完，现在再试一次）
+                    if (!g_bypassInstalled) {
+                        installBypassSwizzles();
+                    }
 
                     // 隐藏遮罩窗口
                     g_crackWindow.hidden = YES;
@@ -532,12 +561,17 @@ static void crack_init(int argc, const char **argv) {
         NSLog(@"[CRACK] ===== crack.dylib loaded =====");
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            // ====== 1. 立即安装绕过 swizzle（带重试） ======
+            // 不管卡密验证状态如何，swizzle 必须先装好
+            // 因为 app 的 beginVerification/nw_runEntryPipeline 可能在卡密弹窗之前就调
+            tryInstallBypassWithRetry();
+
+            // ====== 2. 检查卡密验证状态 ======
             BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
 
             if (alreadyVerified) {
-                // 已验证，直接安装绕过 swizzle（不需要弹窗）
-                NSLog(@"[CRACK] already verified, installing bypass directly");
-                installBypassSwizzles();
+                // 已验证，不需要弹窗遮罩
+                NSLog(@"[CRACK] already verified, no window needed");
                 return;
             }
 
