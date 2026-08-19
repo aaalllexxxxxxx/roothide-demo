@@ -1,4 +1,4 @@
-name: Build Cracked IPA
+name: Build crack.dylib
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
     branches: [main, master]
     paths:
       - 'crack_dylib.m'
-      - 'inject_dylib.py'
       - '.github/workflows/build.yml'
 
 jobs:
@@ -16,18 +15,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-
-    - name: Install tools
-      run: |
-        brew install ldid
-        # 编译 insert_dylib（成熟的 Mach-O 注入工具）
-        git clone https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
-        cd /tmp/insert_dylib
-        # 自动找到源码文件（可能是 .c 或 .m，可能在子目录里）
-        SRC=$(find . -name "insert_dylib.c" -o -name "insert_dylib.m" | head -1)
-        echo "Found source: $SRC"
-        clang -o insert_dylib "$SRC" -framework Foundation
-        sudo cp insert_dylib /usr/local/bin/
 
     - name: Compile crack.dylib
       run: |
@@ -41,74 +28,10 @@ jobs:
           -undefined dynamic_lookup \
           -flat_namespace \
           -o crack.dylib crack_dylib.m
-        echo "=== dylib info ==="
+
+        echo "=== info ==="
         file crack.dylib
         otool -L crack.dylib
-
-    - name: Download original IPA
-      env:
-        ORIGINAL_IPA_URL: ${{ secrets.ORIGINAL_IPA_URL }}
-      run: |
-        if [ -z "$ORIGINAL_IPA_URL" ]; then
-          echo "ORIGINAL_IPA_URL secret not set, checking if IPA exists in repo..."
-          if [ -f "AUG模型漏打8.12更新.ipa" ]; then
-            cp "AUG模型漏打8.12更新.ipa" original.ipa
-          else
-            echo "ERROR: No IPA found."
-            exit 1
-          fi
-        else
-          curl -L -o original.ipa "$ORIGINAL_IPA_URL"
-        fi
-        echo "=== IPA info ==="
-        ls -la original.ipa
-
-    - name: Inject dylib and build IPA
-      run: |
-        # 创建工作目录
-        mkdir -p build_temp
-        cd build_temp
-
-        # 解压 IPA
-        unzip -o ../original.ipa
-
-        # 找到 .app
-        APP_DIR=$(find Payload -name "*.app" -type d | head -1)
-        APP_NAME=$(basename "$APP_DIR" .app)
-        echo "App: $APP_NAME, path: $APP_DIR"
-
-        # 复制 crack.dylib 到 .app
-        cp ../crack.dylib "$APP_DIR/crack.dylib"
-        echo "Copied crack.dylib"
-
-        # 用 insert_dylib 注入 LC_LOAD_DYLIB
-        # --inplace: 直接修改文件
-        # --weak: 用 LC_LOAD_WEAK_DYLIB（加载失败也不崩溃）
-        insert_dylib --inplace --weak "$APP_DIR/crack.dylib" "$APP_DIR/$APP_NAME"
-        echo "Injected LC_LOAD_DYLIB"
-        otool -l "$APP_DIR/$APP_NAME" | grep -A 2 "LC_LOAD.*DYLIB" | head -20
-
-        # 删除原有代码签名
-        rm -rf "$APP_DIR/_CodeSignature"
-        echo "Removed _CodeSignature"
-
-        # 用 ldid 重签名
-        ldid -S "$APP_DIR"
-        ldid -S "$APP_DIR/crack.dylib"
-        echo "Re-signed with ldid"
-
-        # 重新打包
-        zip -r ../PUBG_HUD_破解版.ipa Payload/
-        cd ..
-        echo "=== Output ==="
-        ls -la PUBG_HUD_破解版.ipa
-
-    - name: Upload cracked IPA
-      uses: actions/upload-artifact@v4
-      with:
-        name: PUBG_HUD_破解版_IPA
-        path: PUBG_HUD_破解版.ipa
-        retention-days: 90
 
     - name: Upload crack.dylib
       uses: actions/upload-artifact@v4
