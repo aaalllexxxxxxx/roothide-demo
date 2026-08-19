@@ -1,7 +1,9 @@
 // crack_dylib.m
 // 单纯卡密验证弹窗（系统 UIAlertController）
-// - 首次进入需要输入卡密，验证通过后持久化（NSUserDefaults）
-// - 卡密错误提示重新输入，不跳转任何链接
+// - 打开软件马上弹卡密输入
+// - 输入正确 → 弹窗消失，正常使用（每次打开都要输）
+// - 输入错误 → 提示重新输入
+// - 点取消 → 退出软件
 //
 // 编译:
 // clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit \
@@ -15,7 +17,6 @@
 
 // ====== 常量 ======
 static NSString *const KAMI_CORRECT = @"XianyuWeihuabinggan";
-static NSString *const KEY_KAMI_VERIFIED = @"crack_kami_verified";
 
 // ====== 全局引用 ======
 static UIWindow *g_crackWindow = nil;
@@ -51,13 +52,6 @@ static void showKamiAlert() {
         @autoreleasepool {
             NSLog(@"[CRACK] showKamiAlert");
 
-            // 检查是否已验证过（持久化）
-            BOOL alreadyVerified = [[NSUserDefaults standardUserDefaults] boolForKey:KEY_KAMI_VERIFIED];
-            if (alreadyVerified) {
-                NSLog(@"[CRACK] already verified (persisted), skip");
-                return;
-            }
-
             UIViewController *rootVC = getCrackRootVC();
             if (rootVC.presentedViewController) {
                 NSLog(@"[CRACK] alert already showing, skip");
@@ -88,10 +82,8 @@ static void showKamiAlert() {
                     NSLog(@"[CRACK] input: %@", input);
 
                     if ([input isEqualToString:KAMI_CORRECT]) {
-                        // 卡密正确 - 持久化保存
-                        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:KEY_KAMI_VERIFIED];
-                        [[NSUserDefaults standardUserDefaults] synchronize];
-                        NSLog(@"[CRACK] kami correct! persisted.");
+                        // 卡密正确，隐藏窗口
+                        NSLog(@"[CRACK] kami correct!");
                         g_crackWindow.hidden = YES;
 
                     } else {
@@ -117,16 +109,14 @@ static void showKamiAlert() {
                     }
                 }];
 
-            // 取消按钮（点了也会重新弹）
+            // 取消按钮 → 退出软件
             UIAlertAction *cancelAction = [UIAlertAction
                 actionWithTitle:@"取消"
                           style:UIAlertActionStyleCancel
                         handler:^(UIAlertAction *action) {
-                    NSLog(@"[CRACK] user cancelled, re-show in 1s");
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        showKamiAlert();
-                    });
+                    NSLog(@"[CRACK] user cancelled, exit app");
+                    // 退出软件
+                    exit(0);
                 }];
 
             [alert addAction:verifyAction];
@@ -144,9 +134,8 @@ static void crack_init(int argc, const char **argv) {
     @autoreleasepool {
         NSLog(@"[CRACK] ===== crack.dylib loaded =====");
 
-        // 延迟 2 秒后弹出卡密界面，确保 app UI 完全初始化
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
+        // 马上弹出卡密界面（不延迟）
+        dispatch_async(dispatch_get_main_queue(), ^{
             showKamiAlert();
         });
     }
