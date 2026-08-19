@@ -264,6 +264,32 @@ static void injectOffsetsAndFeature() {
 }
 
 // ====== Swizzled 方法实现 ======
+// 必须放在一个 Category 里，否则编译器报 "missing context for method declaration"
+
+@interface NwEntryPanel (Crack)
+- (void)crack_beginVerification;
+- (void)crack_onActivateTap;
+- (void)crack_nw_runEntryPipeline;
+- (void)crack_finishSuccess;
+- (void)crack_setRuntimeLicenseOK:(BOOL)val;
+- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg;
+@end
+
+@interface NwSession (Crack)
+- (void)crack_setRuntimeLicenseOK:(BOOL)val;
+- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg;
+- (void)crack_nw_sessEnd:(NSInteger)status message:(NSString *)msg;
+- (void)crack_clearSession;
+- (void)crack_startLicenseWatchWithInterval:(double)interval;
+- (void)crack_startHeartbeatWithInterval:(double)interval onResult:(id)block;
++ (void)crack_showForceExitAlertWithMessage:(NSString *)msg;
+@end
+
+@interface MainRootViewController (Crack)
+- (void)crack_nw_onSessEnd:(id)notif;
+@end
+
+@implementation NwEntryPanel (Crack)
 
 // beginVerification → 替换为卡密验证界面
 - (void)crack_beginVerification {
@@ -332,6 +358,22 @@ static void injectOffsetsAndFeature() {
     NSLog(@"[CRACK] Blocked nw_revokeRuntimeLicense:");
 }
 
+@end
+
+@implementation NwSession (Crack)
+
+// setRuntimeLicenseOK: → 强制 YES
+- (void)crack_setRuntimeLicenseOK:(BOOL)val {
+    @autoreleasepool {
+        [(id)self crack_setRuntimeLicenseOK:YES];
+    }
+}
+
+// nw_revokeRuntimeLicense: → 阻止
+- (void)crack_nw_revokeRuntimeLicense:(BOOL)arg {
+    NSLog(@"[CRACK] Blocked nw_revokeRuntimeLicense:");
+}
+
 // nw_sessEnd:message: → 阻止
 - (void)crack_nw_sessEnd:(NSInteger)status message:(NSString *)msg {
     NSLog(@"[CRACK] Blocked nw_sessEnd:status:");
@@ -357,10 +399,16 @@ static void injectOffsetsAndFeature() {
     NSLog(@"[CRACK] Blocked showForceExitAlertWithMessage:");
 }
 
+@end
+
+@implementation MainRootViewController (Crack)
+
 // nw_onSessEnd: → 阻止
 - (void)crack_nw_onSessEnd:(id)notif {
     NSLog(@"[CRACK] Blocked nw_onSessEnd:");
 }
+
+@end
 
 // ====== dylib 加载入口 ======
 __attribute__((constructor))
