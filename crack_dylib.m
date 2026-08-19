@@ -1,6 +1,6 @@
 // crack_dylib.m
-// 最简测试版：只弹一个卡密输入弹窗
-// 不做任何 swizzle/hook，只验证 dylib 是否被加载
+// 最简测试版：弹一个卡密输入弹窗（独立 UIWindow，不被覆盖）
+// 不做任何 swizzle/hook，只验证 dylib 被加载
 //
 // 编译:
 // clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit \
@@ -152,35 +152,51 @@
 
 @end
 
-// ====== 弹出卡密界面 ======
+// ====== 空的 ViewController（给 UIWindow 用） ======
+@interface CrackViewController : UIViewController
+@end
+
+@implementation CrackViewController
+@end
+
+// ====== 全局引用 ======
+static UIWindow *g_crackWindow = nil;
+
+// ====== 弹出卡密界面（使用独立 UIWindow） ======
 static void showKamiView() {
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
             NSLog(@"[CRACK] showKamiView called");
 
-            // 获取 app 的主窗口
-            UIWindow *window = nil;
-            for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                if (w.isKeyWindow || (!window)) {
-                    window = w;
-                }
-            }
-            if (!window) {
-                NSLog(@"[CRACK] no window found, retry in 1s");
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    showKamiView();
-                });
+            // 如果已经创建过，直接 bring to front
+            if (g_crackWindow) {
+                g_crackWindow.hidden = NO;
+                [g_crackWindow makeKeyAndVisible];
+                NSLog(@"[CRACK] reuse existing crack window");
                 return;
             }
 
-            NSLog(@"[CRACK] window: %@", window);
-
             CGRect screenBounds = [UIScreen mainScreen].bounds;
+
+            // 创建独立的 UIWindow，windowLevel 设为 Alert 级别（高于普通窗口）
+            g_crackWindow = [[UIWindow alloc] initWithFrame:screenBounds];
+            g_crackWindow.windowLevel = UIWindowLevelAlert; // 比普通 app 窗口高
+            g_crackWindow.backgroundColor = [UIColor clearColor];
+
+            // 设置 rootViewController（iOS 13+ 需要 scene，但巨魔环境一般没 scene）
+            CrackViewController *vc = [[CrackViewController alloc] init];
+            g_crackWindow.rootViewController = vc;
+
+            // 创建卡密验证视图
             CrackVerifyView *verifyView = [[CrackVerifyView alloc] initWithFrame:screenBounds];
             verifyView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [window addSubview:verifyView];
-            NSLog(@"[CRACK] kami view added to window");
+            [g_crackWindow addSubview:verifyView];
+
+            // 显示窗口
+            g_crackWindow.hidden = NO;
+            [g_crackWindow makeKeyAndVisible];
+
+            NSLog(@"[CRACK] crack window created and shown (level=Alert)");
         }
     });
 }
@@ -189,9 +205,9 @@ static void showKamiView() {
 __attribute__((constructor))
 static void crack_init(int argc, const char **argv) {
     @autoreleasepool {
-        NSLog(@"[CRACK] ===== crack.dylib loaded (simple test version) =====");
+        NSLog(@"[CRACK] ===== crack.dylib loaded (UIWindow version) =====");
 
-        // 延迟 2 秒后弹出卡密界面，确保 UI 完全初始化
+        // 延迟 2 秒后弹出卡密界面，确保 app UI 完全初始化
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             showKamiView();
