@@ -411,16 +411,17 @@ static void injectOffsetsAndFeature() {
 @end
 
 // ====== dylib 加载入口 ======
-__attribute__((constructor))
-static void crack_init(int argc, const char **argv) {
-    @autoreleasepool {
-        NSLog(@"[CRACK] ===== crack.dylib loaded =====");
+// 不能用 __attribute__((constructor))，因为此时 ObjC 类还没加载完
+// 需要监听 UIApplicationDidFinishLaunchingNotification，等 app 完全启动后再 swizzle
 
-        // Method swizzle
+static void doSwizzle() {
+    @autoreleasepool {
+        NSLog(@"[CRACK] ===== crack.dylib doSwizzle =====");
+
         Class panelClass = objc_getClass("NwEntryPanel");
+        NSLog(@"[CRACK] NwEntryPanel class = %@", panelClass);
 
         if (panelClass) {
-            // 实例方法
             swizzleMethod(panelClass,
                 NSSelectorFromString(@"beginVerification"),
                 NSSelectorFromString(@"crack_beginVerification"));
@@ -450,13 +451,12 @@ static void crack_init(int argc, const char **argv) {
                 NSSelectorFromString(@"nw_revokeRuntimeLicense:"),
                 NSSelectorFromString(@"crack_nw_revokeRuntimeLicense:"));
             NSLog(@"[CRACK] Swizzled nw_revokeRuntimeLicense:");
-
-            // 如果 nw_sessEnd:message: 是 NwEntryPanel 的方法
-            // 实际上它在 NwSession 上，需要单独处理
+        } else {
+            NSLog(@"[CRACK] WARNING: NwEntryPanel not found!");
         }
 
-        // NwSession 的方法
         Class sessionClass = objc_getClass("NwSession");
+        NSLog(@"[CRACK] NwSession class = %@", sessionClass);
         if (sessionClass) {
             swizzleMethod(sessionClass,
                 NSSelectorFromString(@"setRuntimeLicenseOK:"),
@@ -465,7 +465,6 @@ static void crack_init(int argc, const char **argv) {
                 NSSelectorFromString(@"nw_revokeRuntimeLicense:"),
                 NSSelectorFromString(@"crack_nw_revokeRuntimeLicense:"));
 
-            // 检查 nw_sessEnd:message: 在哪个类上
             Method sessEndMethod = class_getInstanceMethod(sessionClass,
                 NSSelectorFromString(@"nw_sessEnd:status:message:"));
             if (sessEndMethod) {
@@ -499,15 +498,16 @@ static void crack_init(int argc, const char **argv) {
                 NSSelectorFromString(@"crack_startHeartbeatWithInterval:onResult:"));
             NSLog(@"[CRACK] Swizzled startHeartbeatWithInterval:onResult:");
 
-            // 类方法
             swizzleClassMethod(sessionClass,
                 NSSelectorFromString(@"showForceExitAlertWithMessage:"),
                 NSSelectorFromString(@"crack_showForceExitAlertWithMessage:"));
             NSLog(@"[CRACK] Swizzled showForceExitAlertWithMessage:");
+        } else {
+            NSLog(@"[CRACK] WARNING: NwSession not found!");
         }
 
-        // MainRootViewController
         Class rootClass = objc_getClass("MainRootViewController");
+        NSLog(@"[CRACK] MainRootViewController class = %@", rootClass);
         if (rootClass) {
             swizzleMethod(rootClass,
                 NSSelectorFromString(@"nw_onSessEnd:"),
@@ -516,6 +516,47 @@ static void crack_init(int argc, const char **argv) {
         }
 
         NSLog(@"[CRACK] ===== All swizzles done =====");
-        NSLog(@"[CRACK] Waiting for app to show kami verify view...");
+    }
+}
+
+// 监听 app 启动完成通知
+static void onAppLaunch(CFNotificationCenterObserver center,
+                        void *observer,
+                        CFStringRef name,
+                        const void *object,
+                        CFDictionaryRef userInfo) {
+    NSLog(@"[CRACK] App did finish launching, starting swizzle...");
+    doSwizzle();
+    // 移除观察者（只需要执行一次）
+    CFNotificationCenterRemoveObserver(
+        CFNotificationCenterGetLocalCenter(),
+        observer,
+        name,
+        NULL);
+}
+
+__attribute__((constructor))
+static void crack_init(int argc, const char **argv) {
+    @autoreleasepool {
+        NSLog(@"[CRACK] ===== crack.dylib loaded =====");
+
+        // 此时 ObjC 类可能还没加载完
+        // 先尝试直接 swizzle，如果类已存在
+        Class panelClass = objc_getClass("NwEntryPanel");
+        if (panelClass) {
+            NSLog(@"[CRACK] Classes already loaded, swizzle now");
+            doSwizzle();
+        } else {
+            NSLog(@"[CRACK] Classes not loaded yet, waiting for app launch...");
+            // 监听 UIApplicationDidFinishLaunchingNotification
+            // 等通知到达后再 swizzle
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetLocalCenter(),
+                NULL,
+                onAppLaunch,
+                CFSTR("UIApplicationDidFinishLaunchingNotification"),
+                NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+        }
     }
 }
