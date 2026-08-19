@@ -520,7 +520,7 @@ static void doSwizzle() {
 }
 
 // 监听 app 启动完成通知
-static void onAppLaunch(CFNotificationCenterObserver center,
+static void onAppLaunch(CFNotificationCenterRef center,
                         void *observer,
                         CFStringRef name,
                         const void *object,
